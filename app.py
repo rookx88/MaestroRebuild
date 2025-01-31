@@ -6,7 +6,8 @@ import os
 import getpass
 import uuid
 from datetime import datetime
-from typing import Optional, Literal, TypedDict
+from typing import Optional, Literal, TypedDict, Any, Dict
+import re
 
 from IPython.display import Image, display
 from pydantic import BaseModel, Field
@@ -18,6 +19,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, MessagesState, END, START
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
+from cryptography.fernet import Fernet
+import json
 
 # Environment configuration
 def _set_env(var: str):
@@ -70,6 +73,19 @@ class UpdateMemory(TypedDict):
     """Memory update decision structure"""
     update_type: Literal['user', 'todo', 'instructions']
 
+class PrivacyConfig(BaseModel):
+    """Configure privacy parameters per memory type"""
+    epsilon: float = Field(1.0, ge=0.1, le=5.0)
+    delta: float = Field(1e-5, le=1e-3)
+    max_retries: int = 3
+    sensitivity_map: Dict[str, float] = Field(
+        default_factory=lambda: {
+            "age": 1.0,
+            "salary": 5000.0,
+            "location": 0.1  # Degrees latitude/longitude
+        }
+    )
+
 # ---------------------------
 # 3. CORE COMPONENTS
 # ---------------------------
@@ -89,11 +105,11 @@ class Spy:
                     r.outputs["generations"][0][0]["message"]["kwargs"]["tool_calls"]
                 )
 
-# Initialize AI components
+
 model = ChatOpenAI(model="gpt-4o", temperature=0)
 spy = Spy()
 
-# Create extractors
+
 profile_extractor = create_extractor(
     model,
     tools=[Profile],
@@ -142,6 +158,38 @@ def extract_tool_info(tool_calls, schema_name="Memory"):
         for c in changes
     )
 
+def sanitize_input(text: str) -> str:
+    """Redact sensitive patterns before processing"""
+    patterns = {
+        # Financial patterns
+        r'\b(password|passphrase|pwd)\s*:\s*\S+': '[REDACTED_CREDENTIAL]',
+        r'\b(password|passphrase|pwd)\s+is\s+\S+': '[REDACTED_CREDENTIAL]',
+        r'\b\d{4}-\d{4}-\d{4}-\d{4}\b': '[REDACTED_PAYMENT_INFO]',
+        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_GOV_ID]',
+        r'\b\d{3}-\d{3}-\d{4}\b': '[REDACTED_PHONE]',  # Add phone numbers
+        
+        # Remove family relationship patterns
+        # Keep temporal patterns for financial contexts
+        r'\b\d+\s+years\b': '[DURATION]'
+    }
+    
+    for pattern, replacement in patterns.items():
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    
+    return text
+
+def sanitize_output(text: str) -> str:
+    """Final output safety net"""
+    patterns = {
+        r'\[REDACTED_.+?\]': '[SECURITY ALERT: Restricted content]',
+        r'\b\d{4,}\b': '[NUM]',
+        # Remove family name patterns
+        r'\b5\s+years\b': '[ANNIVERSARY]'  # Keep if needed for financial context
+    }
+    for pattern, replacement in patterns.items():
+        text = re.sub(pattern, replacement, text)
+    return text
+
 # ---------------------------
 # 5. MEMORY MANAGEMENT WORKFLOW
 # ---------------------------
@@ -150,21 +198,29 @@ def task_mAIstro(state: MessagesState, config: RunnableConfig, store: BaseStore)
     user_id = config["configurable"]["user_id"]
     
     # Retrieve stored memories
-    profile = store.search(("profile", user_id))[0].value if store.search(("profile", user_id)) else None
+    profile = store.search(("profile", user_id))[0] if store.search(("profile", user_id)) else None
     
     # Format ToDos properly
     todo_entries = store.search(("todo", user_id))
     todos = "\n".join(
-        f"- {ToDo(**entry.value).task} ({ToDo(**entry.value).status})"
+        f"- {ToDo(**entry).task} ({ToDo(**entry).status})"
         for entry in todo_entries
     ) if todo_entries else "No current tasks"
     
-    instructions = store.search(("instructions", user_id))[0].value if store.search(("instructions", user_id)) else ""
+    instructions = store.search(("instructions", user_id))[0] if store.search(("instructions", user_id)) else ""
     
-    system_msg = f"""You are a helpful chatbot. Maintain and update:
-    1. User Profile: {profile or 'No profile information'}
-    2. ToDos: {todos}
-    3. Instructions: {instructions or 'No custom instructions'}"""
+    system_msg = f"""You are a financial security assistant. Never reveal:
+    - Credentials (passwords, PINs)
+    - Payment information (cards, bank accounts)
+    - Government IDs (SSN, driver's license)
+    - Contact info (phone numbers, emails)
+
+    Provide helpful responses while protecting financial data.
+
+    Current context:
+    - Profile: {profile or 'No profile'}
+    - ToDos: {todos}
+    - Instructions: {instructions or 'None'}"""
     
     response = model.bind_tools([UpdateMemory]).invoke(
         [SystemMessage(content=system_msg)] + state["messages"]
@@ -252,7 +308,62 @@ Based on this interaction, update your instructions for how to update ToDo list 
 Use any feedback from the user to update how they like to have items added, etc."""
 
 # ---------------------------
-# 6. WORKFLOW SETUP
+# 8. ENCRYPTION LAYER (MOVED BEFORE STORE INIT)
+# ---------------------------
+class EncryptedStore(BaseStore):
+    """Store that encrypts data at rest with AES-128-GCM"""
+    def __init__(self, base_store: BaseStore, key: bytes):
+        self.base_store = base_store
+        self.cipher = Fernet(key)
+
+    # Add these required methods
+    def abatch(self, *args, **kwargs):
+        return self.base_store.abatch(*args, **kwargs)
+    
+    def batch(self, *args, **kwargs):
+        return self.base_store.batch(*args, **kwargs)
+    
+    def _encrypt(self, data: dict) -> str:
+        return self.cipher.encrypt(json.dumps(data).encode()).decode()
+    
+    def _decrypt(self, data: str) -> dict:
+        return json.loads(self.cipher.decrypt(data.encode()).decode())
+    
+    def put(self, namespace: tuple, key: str, value: dict) -> None:
+        print(f"\n[Encryption] Original Data: {value}")
+        encrypted = self._encrypt(value)
+        print(f"[Encryption] Encrypted Data: {encrypted[:50]}...")
+        return self.base_store.put(namespace, key, {"value": encrypted})
+    
+    def get(self, namespace: tuple, key: str) -> Optional[dict]:
+        entry = self.base_store.get(namespace, key)
+        if not entry:
+            return None
+            
+        encrypted_str = entry.value.get("value")
+        print(f"\n[Decryption] Encrypted String: {encrypted_str[:50]}...")
+        decrypted = self._decrypt(encrypted_str)
+        print(f"[Decryption] Decrypted Data: {decrypted}")
+        return decrypted
+    
+    def search(self, namespace: tuple) -> list:
+        return [self._decrypt(e.value.get("value")) for e in self.base_store.search(namespace)]
+    
+    def delete(self, namespace: tuple, key: str) -> None:
+        return self.base_store.delete(namespace, key)
+
+# ---------------------------
+# MODIFIED STORE INITIALIZATION
+# ---------------------------
+# Generate key (store securely in production!)
+ENCRYPTION_KEY = Fernet.generate_key()  
+
+# Create encrypted store
+base_store = InMemoryStore()
+encrypted_store = EncryptedStore(base_store, ENCRYPTION_KEY)
+
+# ---------------------------
+# 6. WORKFLOW SETUP (MOVED AFTER STORE INIT)
 # ---------------------------
 # Graph configuration
 builder = StateGraph(MessagesState)
@@ -289,8 +400,8 @@ within_thread_memory = MemorySaver()
 
 # Compile graph with proper references
 graph = builder.compile(
-    checkpointer=within_thread_memory,
-    store=across_thread_memory
+    checkpointer=MemorySaver(),  # Use proper checkpointer
+    store=encrypted_store         # Encrypted memory data
 )
 
 # Visualization
@@ -309,20 +420,30 @@ def chat_interface():
     # Initialize session
     session_config = {
         "configurable": {
-            "thread_id": str(uuid.uuid4())[:8],  # Short session ID
+            "thread_id": str(uuid.uuid4())[:8],  
             "user_id": input("Please enter your user ID to start: ")
         }
     }
     
+    # Add verification step
+    if ENCRYPTION_KEY:
+        print("\n[Security] Data encryption enabled")
+        # Verify encryption
+        test_data = {"test": "sensitive info"}
+        encrypted_store.put(("system", "test"), "security_check", test_data)
+        retrieved = encrypted_store.get(("system", "test"), "security_check")
+        assert retrieved == test_data, "Encryption/decryption failed!"
+    
     while True:
         try:
-            # Get user input
             user_input = input("\nYou: ").strip()
+            user_input = sanitize_input(user_input)
+            
             if user_input.lower() in ('exit', 'quit'):
                 print("\nAI: Goodbye! Your memories have been saved.")
                 break
                 
-            # Process through workflow
+            
             print("\nAI is processing...")
             for chunk in graph.stream(
                 {"messages": [HumanMessage(content=user_input)]},
@@ -331,7 +452,7 @@ def chat_interface():
             ):
                 if response := chunk.get("messages"):
                     latest_msg = response[-1]
-                    print(f"\nAI: {latest_msg.content}")
+                    print(f"\nAI: {sanitize_output(latest_msg.content)}")
                     
                     # Show memory updates if any
                     if "tool_calls" in latest_msg.additional_kwargs:
