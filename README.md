@@ -1,11 +1,3 @@
-<a id="readme-top"></a>
-
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
-[![LinkedIn][linkedin-shield]][linkedin-url]
 
 <!-- PROJECT LOGO -->
 <br />
@@ -155,3 +147,14 @@ Key features:
 4. Sensitive information will be automatically encrypted and redacted
 
 Example conversation:
+You: Hi, I'm starting a new job next week.
+AI: Hello! I'd be happy to help you update your profile with your new job information. Could you tell me what your new position will be?
+
+You: I'll be a Senior Software Engineer at TechCorp.
+AI: I've updated your profile with your new job information. Is there anything specific about your new role at TechCorp that you'd like me to remember?
+
+You: Yes, I'll be working on their cloud infrastructure team.
+AI: [System] Memory Updated:
+- Profile updated: Job set to "Senior Software Engineer at TechCorp - Cloud Infrastructure Team"
+
+AI: I've added those details to your profile. Would you like me to help you set up any reminders or tasks related to your new job?
