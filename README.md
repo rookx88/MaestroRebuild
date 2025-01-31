@@ -57,7 +57,6 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
-[![Product Screenshot][product-screenshot]](https://example.com)
 
 The AI Encrypted Memory Assistant is a secure conversation management system that combines AI-powered memory retention with military-grade encryption. Built to demonstrate secure implementation of langgraph features.
 
@@ -95,7 +94,6 @@ The AI Encrypted Memory Assistant is a secure conversation management system tha
 - Audit logging for data access
 - GDPR-ready right-to-be-forgotten implementation
 
-[![Security Layers Diagram](images/security-layers.png)](https://example.com/security)
 
 Key features:
 
