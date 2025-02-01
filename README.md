@@ -62,7 +62,7 @@ The AI Encrypted Memory Assistant is a secure conversation management system tha
 
 2. **Input Sanitization**
    ```python
-   # Sample sanitization patterns
+   
    patterns = {
        r'\b\d{4}-\d{4}-\d{4}-\d{4}\b': '[REDACTED_PAYMENT_INFO]',
        r'\b\d{3}-\d{3}-\d{4}\b': '[REDACTED_PHONE]'
@@ -99,10 +99,12 @@ Key features:
 
 ### Built With
 
-* [![Python][Python]][Python-url]
-* [![LangChain][LangChain]][LangChain-url]
-* [![Cryptography][Cryptography]][Cryptography-url]
-* [![Pydantic][Pydantic]][Pydantic-url]
+* [![Python]
+* [![LangChain]
+* [![Cryptography]
+* [![Pydantic]
+
+Re-imagining of MaestroTask Manager Bot created through the https://github.com/langchain-ai langgraph academy.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

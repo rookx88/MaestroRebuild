@@ -1,4 +1,4 @@
-"""AI-Powered Memory Management System"""
+"""AI-Powered Memory Management System with Encrypted Storage"""
 # ---------------------------
 # 1. IMPORTS & ENVIRONMENT SETUP
 # ---------------------------
@@ -82,7 +82,7 @@ class PrivacyConfig(BaseModel):
         default_factory=lambda: {
             "age": 1.0,
             "salary": 5000.0,
-            "location": 0.1  # Degrees latitude/longitude
+            "location": 0.1  
         }
     )
 
@@ -161,16 +161,10 @@ def extract_tool_info(tool_calls, schema_name="Memory"):
 def sanitize_input(text: str) -> str:
     """Redact sensitive patterns before processing"""
     patterns = {
-        # Financial patterns
-        r'\b(password|passphrase|pwd)\s*:\s*\S+': '[REDACTED_CREDENTIAL]',
+        r'\bpassword\s*:\s*\S+': '[REDACTED_CREDENTIAL]',
         r'\b(password|passphrase|pwd)\s+is\s+\S+': '[REDACTED_CREDENTIAL]',
         r'\b\d{4}-\d{4}-\d{4}-\d{4}\b': '[REDACTED_PAYMENT_INFO]',
-        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_GOV_ID]',
-        r'\b\d{3}-\d{3}-\d{4}\b': '[REDACTED_PHONE]',  # Add phone numbers
-        
-        # Remove family relationship patterns
-        # Keep temporal patterns for financial contexts
-        r'\b\d+\s+years\b': '[DURATION]'
+        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_GOV_ID]'
     }
     
     for pattern, replacement in patterns.items():
@@ -182,9 +176,7 @@ def sanitize_output(text: str) -> str:
     """Final output safety net"""
     patterns = {
         r'\[REDACTED_.+?\]': '[SECURITY ALERT: Restricted content]',
-        r'\b\d{4,}\b': '[NUM]',
-        # Remove family name patterns
-        r'\b5\s+years\b': '[ANNIVERSARY]'  # Keep if needed for financial context
+        r'\b\d{4,}\b': '[NUM]'
     }
     for pattern, replacement in patterns.items():
         text = re.sub(pattern, replacement, text)
@@ -200,7 +192,7 @@ def task_mAIstro(state: MessagesState, config: RunnableConfig, store: BaseStore)
     # Retrieve stored memories
     profile = store.search(("profile", user_id))[0] if store.search(("profile", user_id)) else None
     
-    # Format ToDos properly
+    
     todo_entries = store.search(("todo", user_id))
     todos = "\n".join(
         f"- {ToDo(**entry).task} ({ToDo(**entry).status})"
@@ -209,13 +201,11 @@ def task_mAIstro(state: MessagesState, config: RunnableConfig, store: BaseStore)
     
     instructions = store.search(("instructions", user_id))[0] if store.search(("instructions", user_id)) else ""
     
-    system_msg = f"""You are a financial security assistant. Never reveal:
-    - Credentials (passwords, PINs)
-    - Payment information (cards, bank accounts)
-    - Government IDs (SSN, driver's license)
-    - Contact info (phone numbers, emails)
-
-    Provide helpful responses while protecting financial data.
+    system_msg = f"""You are a security-conscious assistant. Follow these rules:
+    1. NEVER repeat sensitive info like passwords, SSNs, or credit cards
+    2. If user shares credentials, acknowledge receipt but don't echo them
+    3. Provide security advice when sensitive info is detected
+    4. Never include redaction markers like [REDACTED] in responses
 
     Current context:
     - Profile: {profile or 'No profile'}
@@ -290,10 +280,10 @@ def route_message(state: MessagesState, config: RunnableConfig, store: BaseStore
     
     update_type = state['messages'][-1].tool_calls[0]['args']['update_type']
     
-    # Explicit mapping to match node names
+    
     return {
         'user': "update_profile",
-        'todo': "update_todos",  # Map 'todo' type to 'update_todos' node
+        'todo': "update_todos",  
         'instructions': "update_instructions"
     }[update_type]
 
@@ -368,7 +358,7 @@ encrypted_store = EncryptedStore(base_store, ENCRYPTION_KEY)
 # Graph configuration
 builder = StateGraph(MessagesState)
 
-# Add main processing node
+# Main processing node
 builder.add_node("task_mAIstro", task_mAIstro)
 
 # Add update nodes
@@ -398,7 +388,7 @@ builder.add_edge("update_instructions", "task_mAIstro")
 across_thread_memory = InMemoryStore()
 within_thread_memory = MemorySaver()
 
-# Compile graph with proper references
+
 graph = builder.compile(
     checkpointer=MemorySaver(),  # Use proper checkpointer
     store=encrypted_store         # Encrypted memory data
