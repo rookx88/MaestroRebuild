@@ -56,7 +56,7 @@ The AI Encrypted Memory Assistant is a secure conversation management system tha
 
 #### Multi-Layer Protection
 1. **Encryption at Rest**
-   - AES-GCM encryption using Fernet with a key loaded from `ENCRYPTION_KEY`
+   - AES-256-GCM encryption using `AESGCM` with a key loaded from `ENCRYPTION_KEY`
    - Automatic key rotation detection
    - Tamper-evident sealed payloads
 
@@ -88,7 +88,7 @@ The AI Encrypted Memory Assistant is a secure conversation management system tha
 
 
 - Key Features:
-- AES-GCM encrypted storage for all user data using a persistent key
+- AES-256-GCM encrypted storage for all user data using a persistent key
 - Sensitive information redaction before processing
 - Secure memory management workflows
 - Tamper-proof data storage

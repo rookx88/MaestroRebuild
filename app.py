@@ -19,7 +19,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, MessagesState, END, START
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import base64
+import logging
 import json
 
 # Environment configuration
@@ -35,6 +37,7 @@ os.environ.update({
 
 # Debug configuration
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO)
 
 # ---------------------------
 # 2. DATA MODELS
@@ -305,10 +308,12 @@ Use any feedback from the user to update how they like to have items added, etc.
 # 8. ENCRYPTION LAYER (MOVED BEFORE STORE INIT)
 # ---------------------------
 class EncryptedStore(BaseStore):
-    """Store that encrypts data at rest with AES-128-GCM"""
+    """Store that encrypts data at rest with AES-256-GCM"""
     def __init__(self, base_store: BaseStore, key: bytes):
+        if len(key) != 32:
+            raise ValueError("Encryption key must be 32 bytes for AES-256-GCM")
         self.base_store = base_store
-        self.cipher = Fernet(key)
+        self.cipher = AESGCM(key)
 
     # Add these required methods
     def abatch(self, *args, **kwargs):
@@ -318,10 +323,14 @@ class EncryptedStore(BaseStore):
         return self.base_store.batch(*args, **kwargs)
     
     def _encrypt(self, data: dict) -> str:
-        return self.cipher.encrypt(json.dumps(data).encode()).decode()
-    
+        nonce = os.urandom(12)
+        ciphertext = self.cipher.encrypt(nonce, json.dumps(data).encode(), None)
+        return base64.urlsafe_b64encode(nonce + ciphertext).decode()
+
     def _decrypt(self, data: str) -> dict:
-        return json.loads(self.cipher.decrypt(data.encode()).decode())
+        raw = base64.urlsafe_b64decode(data.encode())
+        nonce, ciphertext = raw[:12], raw[12:]
+        return json.loads(self.cipher.decrypt(nonce, ciphertext, None).decode())
     
     def put(self, namespace: tuple, key: str, value: dict) -> None:
         encrypted = self._encrypt(value)
@@ -347,11 +356,11 @@ class EncryptedStore(BaseStore):
 # Retrieve encryption key from environment or generate a new one
 env_key = os.getenv("ENCRYPTION_KEY")
 if env_key:
-    ENCRYPTION_KEY = env_key.encode()
+    ENCRYPTION_KEY = base64.urlsafe_b64decode(env_key)
 else:
-    ENCRYPTION_KEY = Fernet.generate_key()
+    ENCRYPTION_KEY = AESGCM.generate_key(bit_length=256)
     if DEBUG:
-        print("[Security] Generated ephemeral encryption key. Set ENCRYPTION_KEY to persist data.")
+        logging.debug("[Security] Generated ephemeral encryption key. Set ENCRYPTION_KEY to persist data.")
 
 # Create encrypted store
 base_store = InMemoryStore()
@@ -422,7 +431,7 @@ def chat_interface():
     
     # Add verification step
     if ENCRYPTION_KEY and DEBUG:
-        print("\n[Security] Data encryption enabled")
+        logging.info("Data encryption enabled")
         # Verify encryption roundtrip in debug mode
         test_data = {"test": "sensitive info"}
         encrypted_store.put(("system", "test"), "security_check", test_data)
