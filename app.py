@@ -33,6 +33,9 @@ os.environ.update({
     "LANGCHAIN_PROJECT": "langchain-academy"
 })
 
+# Debug configuration
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+
 # ---------------------------
 # 2. DATA MODELS
 # ---------------------------
@@ -158,28 +161,29 @@ def extract_tool_info(tool_calls, schema_name="Memory"):
         for c in changes
     )
 
+# Sanitization patterns
+INPUT_PATTERNS = {
+    re.compile(r'\bpassword\s*:\s*\S+', re.IGNORECASE): '[REDACTED_CREDENTIAL]',
+    re.compile(r'\b(password|passphrase|pwd)\s+is\s+\S+', re.IGNORECASE): '[REDACTED_CREDENTIAL]',
+    re.compile(r'\b\d{4}-\d{4}-\d{4}-\d{4}\b'): '[REDACTED_PAYMENT_INFO]',
+    re.compile(r'\b\d{3}-\d{2}-\d{4}\b'): '[REDACTED_GOV_ID]',
+}
+
+OUTPUT_PATTERNS = {
+    re.compile(r'\[REDACTED_.+?\]'): '[SECURITY ALERT: Restricted content]',
+    re.compile(r'\b\d{4,}\b'): '[NUM]',
+}
+
 def sanitize_input(text: str) -> str:
     """Redact sensitive patterns before processing"""
-    patterns = {
-        r'\bpassword\s*:\s*\S+': '[REDACTED_CREDENTIAL]',
-        r'\b(password|passphrase|pwd)\s+is\s+\S+': '[REDACTED_CREDENTIAL]',
-        r'\b\d{4}-\d{4}-\d{4}-\d{4}\b': '[REDACTED_PAYMENT_INFO]',
-        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_GOV_ID]'
-    }
-    
-    for pattern, replacement in patterns.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
+    for pattern, replacement in INPUT_PATTERNS.items():
+        text = pattern.sub(replacement, text)
     return text
 
 def sanitize_output(text: str) -> str:
     """Final output safety net"""
-    patterns = {
-        r'\[REDACTED_.+?\]': '[SECURITY ALERT: Restricted content]',
-        r'\b\d{4,}\b': '[NUM]'
-    }
-    for pattern, replacement in patterns.items():
-        text = re.sub(pattern, replacement, text)
+    for pattern, replacement in OUTPUT_PATTERNS.items():
+        text = pattern.sub(replacement, text)
     return text
 
 # ---------------------------
@@ -320,21 +324,16 @@ class EncryptedStore(BaseStore):
         return json.loads(self.cipher.decrypt(data.encode()).decode())
     
     def put(self, namespace: tuple, key: str, value: dict) -> None:
-        print(f"\n[Encryption] Original Data: {value}")
         encrypted = self._encrypt(value)
-        print(f"[Encryption] Encrypted Data: {encrypted[:50]}...")
         return self.base_store.put(namespace, key, {"value": encrypted})
     
     def get(self, namespace: tuple, key: str) -> Optional[dict]:
         entry = self.base_store.get(namespace, key)
         if not entry:
             return None
-            
+
         encrypted_str = entry.value.get("value")
-        print(f"\n[Decryption] Encrypted String: {encrypted_str[:50]}...")
-        decrypted = self._decrypt(encrypted_str)
-        print(f"[Decryption] Decrypted Data: {decrypted}")
-        return decrypted
+        return self._decrypt(encrypted_str)
     
     def search(self, namespace: tuple) -> list:
         return [self._decrypt(e.value.get("value")) for e in self.base_store.search(namespace)]
@@ -345,8 +344,14 @@ class EncryptedStore(BaseStore):
 # ---------------------------
 # MODIFIED STORE INITIALIZATION
 # ---------------------------
-# Generate key (store securely in production!)
-ENCRYPTION_KEY = Fernet.generate_key()  
+# Retrieve encryption key from environment or generate a new one
+env_key = os.getenv("ENCRYPTION_KEY")
+if env_key:
+    ENCRYPTION_KEY = env_key.encode()
+else:
+    ENCRYPTION_KEY = Fernet.generate_key()
+    if DEBUG:
+        print("[Security] Generated ephemeral encryption key. Set ENCRYPTION_KEY to persist data.")
 
 # Create encrypted store
 base_store = InMemoryStore()
@@ -416,9 +421,9 @@ def chat_interface():
     }
     
     # Add verification step
-    if ENCRYPTION_KEY:
+    if ENCRYPTION_KEY and DEBUG:
         print("\n[Security] Data encryption enabled")
-        # Verify encryption
+        # Verify encryption roundtrip in debug mode
         test_data = {"test": "sensitive info"}
         encrypted_store.put(("system", "test"), "security_check", test_data)
         retrieved = encrypted_store.get(("system", "test"), "security_check")
