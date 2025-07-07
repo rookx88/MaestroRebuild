@@ -1,10 +1,10 @@
 import pytest
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import EncryptedStore, InMemoryStore
 
 @pytest.fixture
 def encrypted_store():
-    key = Fernet.generate_key()
+    key = AESGCM.generate_key(bit_length=256)
     return EncryptedStore(InMemoryStore(), key)
 
 def test_encryption_roundtrip(encrypted_store):
@@ -19,7 +19,7 @@ def test_tamper_detection(encrypted_store):
     encrypted = encrypted_store._encrypt(original)
     
     # Tamper with encrypted data
-    tampered = encrypted[:-1] + "x"
+    tampered = encrypted[:-1] + ("A" if encrypted[-1] != "A" else "B")
     
     with pytest.raises(Exception):
         encrypted_store._decrypt(tampered)

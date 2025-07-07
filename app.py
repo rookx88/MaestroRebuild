@@ -19,7 +19,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, MessagesState, END, START
 from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
-from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import base64
+import logging
 import json
 
 # Environment configuration
@@ -32,6 +34,10 @@ os.environ.update({
     "LANGCHAIN_TRACING_V2": "true",
     "LANGCHAIN_PROJECT": "langchain-academy"
 })
+
+# Debug configuration
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+logging.basicConfig(level=logging.DEBUG if DEBUG else logging.INFO)
 
 # ---------------------------
 # 2. DATA MODELS
@@ -158,28 +164,29 @@ def extract_tool_info(tool_calls, schema_name="Memory"):
         for c in changes
     )
 
+# Sanitization patterns
+INPUT_PATTERNS = {
+    re.compile(r'\bpassword\s*:\s*\S+', re.IGNORECASE): '[REDACTED_CREDENTIAL]',
+    re.compile(r'\b(password|passphrase|pwd)\s+is\s+\S+', re.IGNORECASE): '[REDACTED_CREDENTIAL]',
+    re.compile(r'\b\d{4}-\d{4}-\d{4}-\d{4}\b'): '[REDACTED_PAYMENT_INFO]',
+    re.compile(r'\b\d{3}-\d{2}-\d{4}\b'): '[REDACTED_GOV_ID]',
+}
+
+OUTPUT_PATTERNS = {
+    re.compile(r'\[REDACTED_.+?\]'): '[SECURITY ALERT: Restricted content]',
+    re.compile(r'\b\d{4,}\b'): '[NUM]',
+}
+
 def sanitize_input(text: str) -> str:
     """Redact sensitive patterns before processing"""
-    patterns = {
-        r'\bpassword\s*:\s*\S+': '[REDACTED_CREDENTIAL]',
-        r'\b(password|passphrase|pwd)\s+is\s+\S+': '[REDACTED_CREDENTIAL]',
-        r'\b\d{4}-\d{4}-\d{4}-\d{4}\b': '[REDACTED_PAYMENT_INFO]',
-        r'\b\d{3}-\d{2}-\d{4}\b': '[REDACTED_GOV_ID]'
-    }
-    
-    for pattern, replacement in patterns.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    
+    for pattern, replacement in INPUT_PATTERNS.items():
+        text = pattern.sub(replacement, text)
     return text
 
 def sanitize_output(text: str) -> str:
     """Final output safety net"""
-    patterns = {
-        r'\[REDACTED_.+?\]': '[SECURITY ALERT: Restricted content]',
-        r'\b\d{4,}\b': '[NUM]'
-    }
-    for pattern, replacement in patterns.items():
-        text = re.sub(pattern, replacement, text)
+    for pattern, replacement in OUTPUT_PATTERNS.items():
+        text = pattern.sub(replacement, text)
     return text
 
 # ---------------------------
@@ -301,10 +308,12 @@ Use any feedback from the user to update how they like to have items added, etc.
 # 8. ENCRYPTION LAYER (MOVED BEFORE STORE INIT)
 # ---------------------------
 class EncryptedStore(BaseStore):
-    """Store that encrypts data at rest with AES-128-GCM"""
+    """Store that encrypts data at rest with AES-256-GCM"""
     def __init__(self, base_store: BaseStore, key: bytes):
+        if len(key) != 32:
+            raise ValueError("Encryption key must be 32 bytes for AES-256-GCM")
         self.base_store = base_store
-        self.cipher = Fernet(key)
+        self.cipher = AESGCM(key)
 
     # Add these required methods
     def abatch(self, *args, **kwargs):
@@ -314,27 +323,26 @@ class EncryptedStore(BaseStore):
         return self.base_store.batch(*args, **kwargs)
     
     def _encrypt(self, data: dict) -> str:
-        return self.cipher.encrypt(json.dumps(data).encode()).decode()
-    
+        nonce = os.urandom(12)
+        ciphertext = self.cipher.encrypt(nonce, json.dumps(data).encode(), None)
+        return base64.urlsafe_b64encode(nonce + ciphertext).decode()
+
     def _decrypt(self, data: str) -> dict:
-        return json.loads(self.cipher.decrypt(data.encode()).decode())
+        raw = base64.urlsafe_b64decode(data.encode())
+        nonce, ciphertext = raw[:12], raw[12:]
+        return json.loads(self.cipher.decrypt(nonce, ciphertext, None).decode())
     
     def put(self, namespace: tuple, key: str, value: dict) -> None:
-        print(f"\n[Encryption] Original Data: {value}")
         encrypted = self._encrypt(value)
-        print(f"[Encryption] Encrypted Data: {encrypted[:50]}...")
         return self.base_store.put(namespace, key, {"value": encrypted})
     
     def get(self, namespace: tuple, key: str) -> Optional[dict]:
         entry = self.base_store.get(namespace, key)
         if not entry:
             return None
-            
+
         encrypted_str = entry.value.get("value")
-        print(f"\n[Decryption] Encrypted String: {encrypted_str[:50]}...")
-        decrypted = self._decrypt(encrypted_str)
-        print(f"[Decryption] Decrypted Data: {decrypted}")
-        return decrypted
+        return self._decrypt(encrypted_str)
     
     def search(self, namespace: tuple) -> list:
         return [self._decrypt(e.value.get("value")) for e in self.base_store.search(namespace)]
@@ -345,8 +353,14 @@ class EncryptedStore(BaseStore):
 # ---------------------------
 # MODIFIED STORE INITIALIZATION
 # ---------------------------
-# Generate key (store securely in production!)
-ENCRYPTION_KEY = Fernet.generate_key()  
+# Retrieve encryption key from environment or generate a new one
+env_key = os.getenv("ENCRYPTION_KEY")
+if env_key:
+    ENCRYPTION_KEY = base64.urlsafe_b64decode(env_key)
+else:
+    ENCRYPTION_KEY = AESGCM.generate_key(bit_length=256)
+    if DEBUG:
+        logging.debug("[Security] Generated ephemeral encryption key. Set ENCRYPTION_KEY to persist data.")
 
 # Create encrypted store
 base_store = InMemoryStore()
@@ -416,9 +430,9 @@ def chat_interface():
     }
     
     # Add verification step
-    if ENCRYPTION_KEY:
-        print("\n[Security] Data encryption enabled")
-        # Verify encryption
+    if ENCRYPTION_KEY and DEBUG:
+        logging.info("Data encryption enabled")
+        # Verify encryption roundtrip in debug mode
         test_data = {"test": "sensitive info"}
         encrypted_store.put(("system", "test"), "security_check", test_data)
         retrieved = encrypted_store.get(("system", "test"), "security_check")
